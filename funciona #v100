@@ -1,0 +1,124 @@
+from telethon import TelegramClient, events
+import MetaTrader5 as mt5
+import logging
+import re
+
+# Configuración del logging
+logging.basicConfig(level=logging.INFO)
+
+# Reemplaza estos valores con tus credenciales de Telegram
+api_id = '242398799'
+api_hash = '11a9f6b1b59fc701abf1d17faa250126'
+client = TelegramClient('session_name', api_id, api_hash)
+
+# Cambia esto al nombre de usuario o ID del grupo
+GROUP_ID = 2363078463  # ID del grupo sin comillas
+
+# Inicializa la conexión a MetaTrader 5
+if not mt5.initialize():
+    logging.error("Error al inicializar MetaTrader 5")
+    mt5.shutdown()
+
+# Tamaño de lote predeterminado
+lot_size = 0.5  # Cambia este valor según tu preferencia
+
+# Diccionario de interpretación de símbolos y lotes mínimos
+symbol_mapping = {
+    "#Volatility 50": "Volatility 50 Index",
+    "#Step Index": "Step Index",
+    "#V50 (1s)": "Volatility 50 (1s) Index",
+    "#Jump 75": "Jump 75 Index",
+    "#V10 (1s)": "Volatility 10 (1s) Index",
+    "#V100": "Volatility 100 Index",
+    "#V75 (1s)": "Volatility 75 (1s) Index",
+}
+
+min_lots = {
+    'Volatility 50 Index': 0.3,
+    'Step Index': 0.1,
+    'Volatility 50 (1s) Index': 0.01,
+    'Jump 75 Index': 0.01,
+    'Volatility 10 (1s) Index': 0.01,
+    'Volatility 100 Index': 0.3,
+    'Volatility 75 (1s) Index': 0.01,
+}
+
+def interpret_symbol(symbol):
+    interpreted = symbol_mapping.get(symbol, symbol)  # Mapea o devuelve el original
+    logging.info(f"Símbolo interpretado: {interpreted}")
+    return interpreted
+
+def get_current_price(symbol):
+    symbol_info = mt5.symbol_info_tick(symbol)
+    if symbol_info:
+        return symbol_info.bid if symbol_info.bid else None
+    logging.error(f"No se pudo obtener el precio actual para {symbol}")
+    return None
+
+def execute_trade(symbol, volume, order_type, entry_price, take_profit, stop_loss):
+    current_price = get_current_price(symbol)
+    if current_price is None:
+        return
+
+    if order_type == 'buy':
+        if entry_price < current_price:
+            result = mt5.order_send(symbol=symbol, action=mt5.ORDER_TYPE_BUY_LIMIT, volume=volume,
+                                     price=entry_price, tp=take_profit, sl=stop_loss)
+        else:
+            result = mt5.order_send(symbol=symbol, action=mt5.ORDER_TYPE_BUY_STOP, volume=volume,
+                                     price=entry_price, tp=take_profit, sl=stop_loss)
+
+    elif order_type == 'sell':
+        if entry_price > current_price:
+            result = mt5.order_send(symbol=symbol, action=mt5.ORDER_TYPE_SELL_LIMIT, volume=volume,
+                                     price=entry_price, tp=take_profit, sl=stop_loss)
+        else:
+            result = mt5.order_send(symbol=symbol, action=mt5.ORDER_TYPE_SELL_STOP, volume=volume,
+                                     price=entry_price, tp=take_profit, sl=stop_loss)
+    else:
+        logging.error("Tipo de orden desconocido")
+        return
+
+    if result.retcode != mt5.TRADE_RETCODE_DONE:
+        logging.error(f"Error al ejecutar la orden: {result.retcode}")
+
+@client.on(events.NewMessage(chats=GROUP_ID))  # ID del grupo
+async def handler(event):
+    global lot_size  # Declarar la variable como global
+    message = event.message.message  # Captura el mensaje
+    logging.info("Mensaje recibido: " + message)
+    
+    # Expresión regular mejorada para capturar TP y SL correctamente
+    match = re.search(r'(#\S+)\s+(buy|sell)\s+Now\s+([\d\.]+)[^\d]*🔰TP\s+([\d\.]+)[^\d]*🔰TP\s+([\d\.]+)[^\d]*🔰TP\s+([\d\.]+)[^\d]*❌SL\s+([\d\.]+)', message, re.IGNORECASE)
+    
+    if match:
+        raw_symbol = match.group(1).strip()  # Obtener el símbolo crudo
+        order_type = match.group(2).strip().lower()
+        entry_price = float(match.group(3).strip())
+        take_profit = float(match.group(4).strip())  # Capturamos el primer TP
+        stop_loss = float(match.group(7).strip())  # Capturamos el SL correctamente
+
+        # Interpretar el símbolo
+        symbol = interpret_symbol(raw_symbol)
+
+        # Obtener el tamaño de lote mínimo
+        min_lot = min_lots.get(symbol, 0.01)  # Usa 0.01 como lote mínimo por defecto
+        lot_size = max(lot_size, min_lot)  # Asegúrate de no usar un lote menor que el mínimo
+
+        logging.info(f"Tamaño de lote calculado para {symbol}: {lot_size}")
+        logging.info(f"Ejecutando trade: {order_type} {symbol} a {entry_price}, TP: {take_profit}, SL: {stop_loss}, Lote: {lot_size}")
+        execute_trade(symbol, lot_size, order_type, entry_price, take_profit, stop_loss)
+    else:
+        logging.warning("No se pudo interpretar el mensaje.")
+        logging.info(f"Mensaje que no se pudo interpretar: {message}")
+
+async def main():
+    await client.start()
+    logging.info("Cliente de Telegram iniciado.")
+    await client.run_until_disconnected()
+
+with client:
+    client.loop.run_until_complete(main())
+
+# Cierre de la conexión a MetaTrader 5 al finalizar
+mt5.shutdown()
